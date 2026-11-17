@@ -1,4 +1,4 @@
-name: "Termius Interactive SSH Runner"
+name: "Termius Interactive SSH Runner with mouse scrolling"
 
 on:
   workflow_dispatch:
