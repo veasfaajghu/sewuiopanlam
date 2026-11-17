@@ -1,0 +1,189 @@
+name: "Clean SSH Runner (Bore.pub - 6h No Limit)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_password:
+        description: "SSH Password for runner user (leave blank for random)"
+        required: false
+        type: string
+        default: ""
+      custom_port:
+        description: "Desired port on bore.pub (optional, leave blank for auto)"
+        required: false
+        type: string
+        default: ""
+      discord_webhook:
+        description: "Discord Webhook URL (optional, to receive instant connect alert)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  ssh-session:
+    name: "Clean Password SSH Terminal (Bore)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub maximum job limit: 6 hours
+
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "Display Runner System Specs"
+        run: |
+          echo "=========================================================="
+          echo "💻 GitHub Actions Runner VM Ready for Termius Connection"
+          echo "   OS: $(lsb_release -d 2>/dev/null | cut -f2 || uname -s)"
+          echo "   CPU Cores: $(nproc)"
+          echo "   Total RAM: $(free -h | awk '/^Mem:/ {print $2}')"
+          echo "   Disk Space: $(df -h / | awk 'NR==2 {print $4}') available"
+          echo "=========================================================="
+
+      - name: "Configure Standard OpenSSH Server with Anti-Idle KeepAlive"
+        id: ssh_setup
+        run: |
+          # 1. Generate or set custom SSH password
+          INPUT_PASS="${{ github.event.inputs.ssh_password }}"
+          if [ -z "$INPUT_PASS" ]; then
+            SSH_PASS=$(openssl rand -hex 6)
+          else
+            SSH_PASS="$INPUT_PASS"
+          fi
+          
+          # Set password for runner user
+          echo "runner:$SSH_PASS" | sudo chpasswd
+          echo "::add-mask::$SSH_PASS"
+          echo "ssh_password=$SSH_PASS" >> "$GITHUB_OUTPUT"
+
+          # 2. Enable Password Authentication in sshd
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
+
+          # 3. Aggressive Anti-Idle KeepAlive (pings client every 15s to prevent drops)
+          sudo sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 15/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 1200/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*TCPKeepAlive.*/TCPKeepAlive yes/' /etc/ssh/sshd_config
+          
+          # Ensure ssh service is started
+          sudo systemctl restart ssh || sudo service ssh restart
+          echo "✅ OpenSSH server configured with password login and 15s Anti-Idle KeepAlive."
+
+      - name: "Install Bore CLI"
+        run: |
+          echo "📦 Downloading bore tunnel client..."
+          curl -fsSL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | sudo tar -xz -C /usr/local/bin
+          sudo chmod +x /usr/local/bin/bore
+          bore -V
+
+      - name: "Launch Bore TCP Tunnel & Format Termius Details"
+        env:
+          SSH_PASS: ${{ steps.ssh_setup.outputs.ssh_password }}
+          INPUT_PORT: ${{ github.event.inputs.custom_port }}
+          INPUT_DISCORD: ${{ github.event.inputs.discord_webhook }}
+          SECRET_DISCORD: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          DISCORD_WEBHOOK="${INPUT_DISCORD:-$SECRET_DISCORD}"
+
+          echo "🚀 Starting Bore TCP Tunnel to bore.pub on port 22..."
+          PORT_FLAG=""
+          if [ -n "$INPUT_PORT" ]; then
+            PORT_FLAG="-p $INPUT_PORT"
+          fi
+
+          bore local 22 --to bore.pub $PORT_FLAG > /tmp/bore.log 2>&1 &
+          BORE_PID=$!
+
+          # Wait for Bore to output assigned port
+          echo "Waiting for Bore public port..."
+          SSH_HOST="bore.pub"
+          SSH_PORT=""
+          for i in {1..20}; do
+            sleep 1
+            SSH_PORT=$(grep -oE "listening at bore.pub:[0-9]+" /tmp/bore.log | cut -d':' -f2 | head -n 1 || true)
+            if [ -z "$SSH_PORT" ]; then
+              SSH_PORT=$(grep -oE "remote_port=[0-9]+" /tmp/bore.log | cut -d'=' -f2 | head -n 1 || true)
+            fi
+            if [ -n "$SSH_PORT" ]; then
+              break
+            fi
+          done
+
+          if [ -z "$SSH_PORT" ]; then
+            echo "❌ Failed to parse port from Bore log. Log output:"
+            cat /tmp/bore.log
+            exit 1
+          fi
+
+          echo "✅ Bore Tunnel ready at $SSH_HOST:$SSH_PORT"
+
+          # ====================================================================
+          # SECURITY: If Discord Webhook is provided, hide credentials from logs!
+          # ====================================================================
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            # Mask port and password from public logs
+            echo "::add-mask::$SSH_PORT"
+
+            echo ""
+            echo "=========================================================="
+            echo "🔒 SECURE MODE ACTIVE (Public Repo Protection)"
+            echo "=========================================================="
+            echo "   ✅ Bore SSH Tunnel established successfully."
+            echo "   📨 Full connection details sent privately to your Discord!"
+            echo "   🛡️ Port and Password are HIDDEN from these logs"
+            echo "      to prevent strangers on GitHub from hijacking your runner."
+            echo "=========================================================="
+            echo ""
+
+            # Write safe masked summary to GitHub
+            echo "### 🔒 Secure Session Active (Bore 6-Hour Runner)" >> "$GITHUB_STEP_SUMMARY"
+            echo "Connection credentials have been securely dispatched to your **Discord webhook**." >> "$GITHUB_STEP_SUMMARY"
+            echo "> 🛡️ Details are masked in public logs to keep your runner safe from unauthorized access." >> "$GITHUB_STEP_SUMMARY"
+
+            # Send private details directly to Discord
+            curl -s -H "Content-Type: application/json" -X POST -d "{
+              \"content\": \"🚀 **Clean Password SSH Ready! (Bore - No 1h Limit)**\\n\\n**Host:** \`$SSH_HOST\`\\n**Port:** \`$SSH_PORT\`\\n**User:** \`runner\`\\n**Password:** \`$SSH_PASS\`\\n**Full Command:**\\n\`ssh runner@$SSH_HOST -p $SSH_PORT\`\\n\\n⚡ **Lifetime:** Up to 6 hours · Anti-Idle KeepAlive active (15s pings)\"
+            }" "$DISCORD_WEBHOOK" >/dev/null || true
+
+          else
+            # Fallback if no Discord webhook provided
+            echo ""
+            echo "=========================================================="
+            echo "⚠️  WARNING: NO DISCORD WEBHOOK PROVIDED"
+            echo "=========================================================="
+            echo "   Hostname / IP: $SSH_HOST"
+            echo "   Port:          $SSH_PORT"
+            echo "   Username:      runner"
+            echo "   Password:      $SSH_PASS"
+            echo "   Full Command:  ssh runner@$SSH_HOST -p $SSH_PORT"
+            echo "=========================================================="
+            echo "👉 TIP: Provide a discord_webhook input next time to hide"
+            echo "   these credentials completely from public GitHub logs!"
+            echo "=========================================================="
+            echo ""
+
+            echo "### 📱 Enter these exact fields in Termius:" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Termius Field | Value to Enter |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Hostname / IP** | \`$SSH_HOST\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Port** | \`$SSH_PORT\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Username** | \`runner\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Password** | \`$SSH_PASS\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ⏳ **Session Lifetime:** Up to 6 hours (no 1-hour cutoff!)." >> "$GITHUB_STEP_SUMMARY"
+            echo "> 💓 **Anti-Idle KeepAlive:** Server pings every 15s to prevent disconnection when idle." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "⏳ Runner is now listening. Waiting for your SSH connection..."
+
+          # Keepalive loop with auto-restart supervisor
+          while [ ! -f /tmp/keepalive_stop ]; do
+            if ! kill -0 "$BORE_PID" 2>/dev/null; then
+              echo "⚠️ Bore tunnel process exited. Auto-reconnecting on port $SSH_PORT..."
+              bore local 22 --to bore.pub -p "$SSH_PORT" >> /tmp/bore.log 2>&1 &
+              BORE_PID=$!
+            fi
+            sleep 10
+          done
+
+          echo "Session finished."
