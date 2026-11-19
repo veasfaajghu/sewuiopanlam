@@ -32,7 +32,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ secrets.GH_OWNER || github.actor }}
-          password: ${{ secrets.MY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.MSR_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: 🐳 Prepare Docker Image (GHCR or Local Build)
         env:
@@ -79,7 +79,7 @@ jobs:
 
       - name: 🚀 Start MSR-Database Container
         env:
-          TOKEN: ${{ secrets.MY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          TOKEN: ${{ secrets.MSR_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           OWNER: ${{ secrets.GH_OWNER || github.actor }}
           REPO: ${{ secrets.GH_REPO || 'dbclone01' }}
         run: |
